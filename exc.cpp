@@ -10,6 +10,9 @@ extern deque<string> IR;
 int main(void) {
     yyparse();
     for(auto &s : IR) {
-        cout << '[' << s << ']' << endl;
+        if(s.find("lb&") == 0)
+            cout << s;
+        else
+            cout << "\t" << s << endl;
     }
 }

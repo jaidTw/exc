@@ -1,6 +1,6 @@
 %{
 #include <deque>
-#include <vector>
+#include <stack>
 #include <unordered_map>
 #include <string>
 #include <cstring>
@@ -20,6 +20,7 @@ extern constexpr char F_TYPE = 0x2;
 extern constexpr char S_TYPE = 0x3;
 
 deque<string> IR;
+stack<void *> else_target;
 unordered_map<string, char> SYMTAB;
 
 void *lookup(string name, char type);
@@ -51,12 +52,12 @@ constexpr char OP_NE = 9;
 
 void *ir_gen_negate(void *a);
 void *ir_gen_infix(void *a, void *b, int op);
+void *ir_gen_cmp(void *a, void *b);
 void *ir_gen_inc(void *a);
 void *ir_gen_begin(void *p);
 void *ir_gen_halt(void *p);
 void *ir_gen_j(void *dst, int op);
 void *ir_gen_store(void *val, void *dst);
-void *ir_gen_call(void *sub, void *param, ...);
 void *ir_gen_decl(string nam, void *type);
 void *ir_gen_decl_arr(string nam, void *type, string size);
 void ir_gen_decl_tmp();
@@ -65,7 +66,6 @@ void ir_gen_decl_tmp();
 %union{
 // symp is a symbol pointer points to the slot in SYMTAB
     void *symp;
-    char strp[512];
     void *notused;
 }
 
@@ -78,7 +78,7 @@ void ir_gen_decl_tmp();
 %left '*' '/'
 %left UMINUS
 
-%type <symp> var_lst var expr type lhs assign for_disp for_decl_end bool_op
+%type <symp> var_lst var expr type lhs assign for_disp for_decl_end bool_op param params then_t else_t;
 %%
 
 start : PROGRAM ID program { ir_gen_begin($2); ir_gen_halt($2); ir_gen_decl_tmp(); };
@@ -90,7 +90,7 @@ stmt_lst : stmt stmt_lst
 
 stmt : decl ';'
      | assign ';'
-     | ID '(' params ')' ';'
+     | ID '(' params ')' ';' { IR.push_back("CALL " + name($1) + ", " + name($3)); }
      | loop
      | cond
      |;
@@ -125,19 +125,20 @@ assign : lhs ASSIGN expr { $$ = ir_gen_store($3, $1); };
 lhs : ID { $$ = $1; }
     | ID '[' expr ']';
 
-params : param
-       | params ',' param;
+params : param { $$ = $1; }
+       | params ',' param { $$ = lookup(name($1) + "," + name($3)); };
 
 param : INTLIT
       | FLOATLIT
       | STRLIT
-      | ID;
+      | ID
+      | expr;
 
 loop : FOR '(' assign for_disp expr for_decl_end stmt_lst ENDFOR {
     if(type($3) != I_TYPE)
         yyerror("FOR counter accepts only integer expressions");
     ir_gen_inc($3);
-    IR.push_back("I_CMP " + name($3) + "," + name($5));
+    ir_gen_cmp($3, $5);
     if(name($4) == "TO")
         ir_gen_j($6, OP_L);
     if(name($4) == "DOWNTO")
@@ -154,9 +155,36 @@ for_decl_end : ')' {
 for_disp : TO { $$ = lookup("TO"); }
          | DOWNTO { $$ = lookup("DOWNTO"); };
 
-cond : IF '(' bool_expr ')' THEN stmt_lst ELSE stmt_lst ENDIF;
+cond : IF '(' bool_expr ')' then_t stmt_lst else_t stmt_lst ENDIF {
+    
+    IR.push_back(name($7) + ":");
+};
 
-bool_expr : expr bool_op expr;
+bool_expr : expr bool_op expr {
+    ir_gen_cmp($1, $3);
+    if(name($2) == string(">=")) ;
+    else if(name($2) == string("<=")) ;
+    else if(name($2) == string("<=")) ;
+    else if(name($2) == string("<=")) ;
+    else if(name($2) == string("<=")) ;
+    else if(name($2) == string("<=")) ;
+};
+
+then_t : THEN {
+    string lbl = new_lbl();
+    void *lblp = lookup(lbl);
+    else_target.push(lblp);
+    $$ = ir_gen_j(lblp, OP_L);
+};
+
+else_t : ELSE {
+    string lbl = new_lbl();
+    void *lblp = lookup(lbl);
+    $$ = ir_gen_j(lblp, 0);
+    lblp = else_target.top();
+    IR.push_back(name(lblp) + ":");
+    else_target.top();
+};
 
 bool_op : GE { $$ = lookup(">="); }
         | LE { $$ = lookup("<="); }
@@ -202,6 +230,18 @@ void *ir_gen_negate(void *a) {
         IR.push_back("F_UMINUS " + name(a) + "," + tmp);
     }
     return lookup(tmp, type(a));
+}
+
+void *ir_gen_cmp(void *a, void *b) {
+    if(type(a) == I_TYPE && type(b) == I_TYPE) {
+        IR.push_back("I_CMP " + name(a) + "," + name(b));
+        return lookup(name(a));
+    } else if(type(a) == F_TYPE || type(b) == F_TYPE){
+        IR.push_back("F_CMP " + name(a) + "," + name(b));
+        return lookup(name(a));
+    }
+    yyerror("Invalid type");
+    return NULL;
 }
 
 void *ir_gen_infix(void *a, void *b, int op) {
@@ -277,7 +317,7 @@ void *ir_gen_decl_arr(string nam, void *typ, string size) {
 }
 
 void ir_gen_decl_tmp() {
-    for(int i = 0; i < tmp_counter; ++i) {
+    for(int i = 0; i <= tmp_counter; ++i) {
         string tmp_nam = tmp_name(i);
         void *tmp = lookup(tmp_nam);
         if(type(tmp) == I_TYPE)
