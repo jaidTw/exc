@@ -26,7 +26,7 @@ unordered_map<string, char> SYMTAB;
 void *lookup(string name, char type);
 void *lookup(string name, char type = N_TYPE);
 
-int lineno = 0;
+int lineno = 1;
 int lbl_counter = 0;
 int tmp_counter = 0;
 
@@ -52,6 +52,7 @@ constexpr char OP_NE = 9;
 
 void *ir_gen_negate(void *a);
 void *ir_gen_infix(void *a, void *b, int op);
+void *ir_gen_infix(void *a, void *b, void *c, int op);
 void *ir_gen_cmp(void *a, void *b);
 void *ir_gen_inc(void *a);
 void *ir_gen_begin(void *p);
@@ -69,8 +70,9 @@ void ir_gen_decl_tmp();
     void *notused;
 }
 
-%token <notused> PROGRAM BEGIN_ END DECLARE AS IF THEN ELSE ENDIF FOR STEP TO DOWNTO ENDFOR WHILE ENDWHILE
-%token <notused> ASSIGN EQ NE G GE L LE SEMICOLON
+%token <notused> PROGRAM BEGIN_ END DECLARE AS IF THEN ELSE ENDIF
+                 FOR STEP TO DOWNTO ENDFOR WHILE ENDWHILE
+                 ASSIGN EQ NE G GE L LE SEMICOLON
 %token <symp> ID STRLIT INTLIT INTEGER FLOATLIT FLOAT
 %token <notused> '+' '-' '*' '/'
 
@@ -78,7 +80,8 @@ void ir_gen_decl_tmp();
 %left '*' '/'
 %left UMINUS
 
-%type <symp> var_lst var expr type lhs assign for_disp for_decl_end bool_op param params then_t else_t;
+%type <symp> var_lst var expr type lhs assign for_disp for_decl_end
+             bool_op param params else_t while_head bool_expr
 %%
 
 start : PROGRAM ID program { ir_gen_begin($2); ir_gen_halt($2); ir_gen_decl_tmp(); };
@@ -141,10 +144,34 @@ loop : FOR '(' assign for_disp expr for_decl_end stmt_lst ENDFOR {
     ir_gen_cmp($3, $5);
     if(name($4) == "TO")
         ir_gen_j($6, OP_L);
-    if(name($4) == "DOWNTO")
+    else if(name($4) == "DOWNTO")
         ir_gen_j($6, OP_G);
 }
-     | FOR '(' for_disp expr STEP expr for_decl_end stmt_lst ENDFOR;
+     | FOR '(' assign for_disp expr STEP expr for_decl_end stmt_lst ENDFOR {
+    if(type($3) != I_TYPE)
+        yyerror("FOR counter accepts only integer expressions");
+    if(name($4) == "TO") {
+        ir_gen_infix($3, $7, $3, OP_PLUS);
+        ir_gen_cmp($3, $5);
+        ir_gen_j($8, OP_L);
+    }
+    else if(name($4) == "DOWNTO") {
+        ir_gen_infix($3, $7, $3, OP_MINUS);
+        ir_gen_cmp($3, $5);
+        ir_gen_j($8, OP_G);
+    }
+}
+     | while_head '(' bool_expr ')'  stmt_lst ENDWHILE {
+    ir_gen_j($1, 0);
+    IR.push_back(name($3) + ":");
+    else_target.pop();
+}
+
+while_head : WHILE {
+    string lbl = new_lbl();
+    IR.push_back(lbl + ":");
+    $$ = lookup(lbl);
+};
 
 for_decl_end : ')' {
     string lbl = new_lbl();
@@ -155,26 +182,27 @@ for_decl_end : ')' {
 for_disp : TO { $$ = lookup("TO"); }
          | DOWNTO { $$ = lookup("DOWNTO"); };
 
-cond : IF '(' bool_expr ')' then_t stmt_lst else_t stmt_lst ENDIF {
-    
+cond : IF '(' bool_expr ')' THEN stmt_lst else_t stmt_lst ENDIF {
     IR.push_back(name($7) + ":");
 };
 
 bool_expr : expr bool_op expr {
     ir_gen_cmp($1, $3);
-    if(name($2) == string(">=")) ;
-    else if(name($2) == string("<=")) ;
-    else if(name($2) == string("<=")) ;
-    else if(name($2) == string("<=")) ;
-    else if(name($2) == string("<=")) ;
-    else if(name($2) == string("<=")) ;
-};
-
-then_t : THEN {
     string lbl = new_lbl();
     void *lblp = lookup(lbl);
+    if(name($2) == string(">="))
+        $$ = ir_gen_j(lblp, OP_L);
+    else if(name($2) == string("<="))
+        $$ = ir_gen_j(lblp, OP_G);
+    else if(name($2) == string(">"))
+        $$ = ir_gen_j(lblp, OP_LE);
+    else if(name($2) == string("<"))
+        $$ = ir_gen_j(lblp, OP_GE);
+    else if(name($2) == string("=="))
+        $$ = ir_gen_j(lblp, OP_NE);
+    else if(name($2) == string("!="))
+        $$ = ir_gen_j(lblp, OP_EQ);
     else_target.push(lblp);
-    $$ = ir_gen_j(lblp, OP_L);
 };
 
 else_t : ELSE {
@@ -183,7 +211,7 @@ else_t : ELSE {
     $$ = ir_gen_j(lblp, 0);
     lblp = else_target.top();
     IR.push_back(name(lblp) + ":");
-    else_target.top();
+    else_target.pop();
 };
 
 bool_op : GE { $$ = lookup(">="); }
@@ -264,6 +292,25 @@ void *ir_gen_infix(void *a, void *b, int op) {
     return NULL;
 }
 
+void *ir_gen_infix(void *a, void *b, void *c, int op) {
+    string opname = "";
+    switch(op) {
+    case OP_PLUS: opname = "ADD "; break;
+    case OP_MINUS: opname = "SUB "; break;
+    case OP_MULTIPLY: opname = "MUL "; break;
+    case OP_DIVISION: opname = "DIV "; break;
+    }
+    if(type(a) == I_TYPE && type(b) == I_TYPE) {
+        IR.push_back("I_" + opname + name(a) + "," + name(b) + "," + name(c));
+        return lookup(name(c), I_TYPE);
+    } else if(type(a) == F_TYPE || type(b) == F_TYPE){
+        IR.push_back("F_" + opname + name(a) + "," + name(b) + "," + name(c));
+        return lookup(name(c), F_TYPE);
+    }
+    yyerror("Invalid type");
+    return NULL;
+}
+
 void *ir_gen_inc(void *a) {
     IR.push_back("INC " + name(a));
     return a;
@@ -303,7 +350,7 @@ void *ir_gen_store(void *val, void *dst) {
     } else {
         yyerror("Invalid type for assignment");
     }
-    return lookup(name(val), type(dst));
+    return lookup(name(dst), type(dst));
 }
 
 void *ir_gen_decl(string nam, void *typ) {
